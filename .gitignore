@@ -1,0 +1,12 @@
+venv/
+drone_nav_env/
+__pycache__/
+*.pyc
+
+# Ignore the heavy data and output folders
+data/
+outputs/
+
+# IMPORTANT: If you want to keep hloc as a submodule, 
+# REMOVE it from here. If you want it ignored, keep it.
+Hierarchical-Localization/
