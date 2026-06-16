@@ -62,3 +62,11 @@ Execute the localization pipeline to fuse visual data with telemetry:
 python navigate.py
 ```
 The script will output the processed trajectory as outputs/estimated_trajectory.srt, which can be visualized in any standard drone telemetry viewer.
+
+```bash
+python target_tracker.py
+```
+This finale script will use the former trajectory srt of the drone given by the hloc, and return the set of points we are looking at in the video.
+
+### FINALE NOTE:
+We only extracted 1 out of every 30 frames(1 second indexes since its 30fps) just for comnfort, we didnt want the hloc script to take a few hours each time and than the output to take too much space, in principal we get the results we intended.
