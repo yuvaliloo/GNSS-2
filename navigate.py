@@ -30,9 +30,10 @@ def extract_frames_from_video(video_path, output_dir, frame_skip=30):
     print(f"Extracted {saved_count} frames for localization.")
     return frame_names
 
-def generate_srt(poses_file, output_srt, test_srt_path, reference_lat, reference_lon, frame_names):
+def generate_srt_and_kml(poses_file, output_srt, output_kml, test_srt_path, reference_lat, reference_lon, frame_names):
     """
-    Combines visual X/Y tracking with telemetry, using Forward Fill for dropped frames.
+    Combines visual tracking with telemetry, and generates a KML map comparing the 
+    Visual Odometry trajectory against the original Drone GPS trajectory.
     """
     print("Fusing Visual Odometry with provided telemetry...")
     
@@ -57,17 +58,19 @@ def generate_srt(poses_file, output_srt, test_srt_path, reference_lat, reference
     srt_content_final = ""
     meters_to_degrees = 1 / 111320.0 
     
-    # Track the last known position for "Dead Reckoning"
     last_known_tx, last_known_ty = 0.0, 0.0
+    
+    # Lists to store coordinates for the KML map
+    estimated_coords = []
+    original_coords = []
     
     # 3. Loop through EVERY single second of the video
     for frame_idx in range(len(frame_names)):
-        target_block_idx = frame_idx * 30  # Jump to the correct 1-second telemetry block
+        target_block_idx = frame_idx * 30 
         
         if target_block_idx >= len(srt_blocks): 
             break 
             
-        # If vision succeeded, update our location. If it failed, keep the old one!
         if frame_idx in visual_poses:
             last_known_tx, last_known_ty = visual_poses[frame_idx]
             
@@ -77,18 +80,26 @@ def generate_srt(poses_file, output_srt, test_srt_path, reference_lat, reference
         current_block = srt_blocks[target_block_idx]
         
         try:
-            # Flexible Regex for DJI naming conventions
-            rel_alt_match = re.search(r'rel_alt:\s*([-0-9.]+)', current_block)
-            pitch_match = re.search(r'(?:gimbal_pitch|camera_pitch|osd_pitch):\s*([-0-9.]+)', current_block)
-            roll_match = re.search(r'(?:gimbal_roll|camera_roll|osd_roll):\s*([-0-9.]+)', current_block)
-            yaw_match = re.search(r'(?:gimbal_heading|gimbal_yaw|camera_yaw|osd_yaw):\s*([-0-9.]+)', current_block)
+            rel_alt_match = re.search(r'(?:rel_alt|osd_alt)\s*:\s*([-0-9.]+)', current_block, re.IGNORECASE)
+            pitch_match = re.search(r'(?:gimbal_pitch|camera_pitch|osd_pitch|osd_pt)\s*:\s*([-0-9.]+)', current_block, re.IGNORECASE)
+            roll_match = re.search(r'(?:gimbal_roll|camera_roll|osd_roll|osd_r)\s*:\s*([-0-9.]+)', current_block, re.IGNORECASE)
+            yaw_match = re.search(r'(?:gimbal_heading|gimbal_yaw|camera_yaw|osd_yaw|osd_head)\s*:\s*([-0-9.]+)', current_block, re.IGNORECASE)
+            orig_lat_match = re.search(r'latitude:\s*([-0-9.]+)', current_block)
+            orig_lon_match = re.search(r'longitude:\s*([-0-9.]+)', current_block)
             
             rel_alt = float(rel_alt_match.group(1)) if rel_alt_match else 0.0
             pitch = float(pitch_match.group(1)) if pitch_match else 0.0
             roll = float(roll_match.group(1)) if roll_match else 0.0
             yaw = float(yaw_match.group(1)) if yaw_match else 0.0
             
-            # Construct the New Block
+            orig_lat = float(orig_lat_match.group(1)) if orig_lat_match else reference_lat
+            orig_lon = float(orig_lon_match.group(1)) if orig_lon_match else reference_lon
+            
+            # Save coordinates for KML (Format required by KML: Longitude,Latitude,Altitude)
+            estimated_coords.append(f"{est_lon:.6f},{est_lat:.6f},{rel_alt:.3f}")
+            original_coords.append(f"{orig_lon:.6f},{orig_lat:.6f},{rel_alt:.3f}")
+            
+            # Construct the New Block for SRT
             lines = current_block.split('\n')
             new_block = []
             for line in lines:
@@ -106,14 +117,49 @@ def generate_srt(poses_file, output_srt, test_srt_path, reference_lat, reference
             print(f"Failed to build block {frame_idx}. Error: {e}")
             continue
 
+    # Write the SRT file
     with open(output_srt, 'w') as f:
         f.write(srt_content_final)
-        
     print(f"Successfully generated fused trajectory to {output_srt}")
+
+    # Write the KML file
+    kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Flight Trajectory Comparison</name>
+    <Style id="redLine">
+      <LineStyle><color>ff0000ff</color><width>4</width></LineStyle>
+    </Style>
+    <Style id="blueLine">
+      <LineStyle><color>ffff0000</color><width>4</width></LineStyle>
+    </Style>
+    <Placemark>
+      <name>Estimated Trajectory (Visual Odometry)</name>
+      <description>The path calculated purely from camera images.</description>
+      <styleUrl>#redLine</styleUrl>
+      <LineString>
+        <tessellate>1</tessellate>
+        <coordinates>{" ".join(estimated_coords)}</coordinates>
+      </LineString>
+    </Placemark>
+    <Placemark>
+      <name>Original Trajectory (Drone GPS)</name>
+      <description>The ground truth recorded by the drone's hardware.</description>
+      <styleUrl>#blueLine</styleUrl>
+      <LineString>
+        <tessellate>1</tessellate>
+        <coordinates>{" ".join(original_coords)}</coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>
+"""
+    with open(output_kml, 'w') as f:
+        f.write(kml_content)
+    print(f"Successfully generated comparison map to {output_kml}")
 
 def main():
     # --- Configuration Paths ---
-    # MAKE SURE THESE MATCH YOUR ACTUAL FILE NAMES
     test_video = Path('data/testing/v12.mp4')
     test_srt_file = Path('data/testing/v12.srt') 
     
@@ -125,24 +171,23 @@ def main():
     matches_path = Path('outputs/matches_query.h5')
     poses_path = Path('outputs/estimated_poses.txt')
     final_srt = Path('outputs/estimated_trajectory.srt')
+    final_kml = Path('outputs/trajectory_comparison.kml') # <-- New KML Output
     
     # 1. Extract Frames
     frame_names = extract_frames_from_video(test_video, query_dir)
     
-    # 2. Setup hloc configurations (Using Fast NN matching)
+    # 2. Setup hloc configurations
     feature_conf = extract_features.confs['superpoint_aachen']
     matcher_conf = match_features.confs['NN-superpoint'] 
     retrieval_conf = extract_features.confs['netvlad']
     
-    # 3. Extract features for the new test frames
+    # 3. Extract features
     print("Extracting features from test frames...")
     extract_features.main(feature_conf, query_dir, image_list=frame_names, feature_path=features_path)
     
     print("Extracting NetVLAD features for the 3D map...")
     map_dir = Path('data/training/extracted_frames')
     map_global_feats = Path('outputs/map_global_feats.h5')
-    
-    # We only need to run this once. If the file exists, it skips it instantly.
     if not map_global_feats.exists():
         extract_features.main(retrieval_conf, map_dir, feature_path=map_global_feats)
         
@@ -150,19 +195,19 @@ def main():
     query_global_feats = Path('outputs/query_global_feats.h5')
     extract_features.main(retrieval_conf, query_dir, image_list=frame_names, feature_path=query_global_feats)
     
+    # 4. Retrieval and Pairs
     print("Pairing test frames with the 3D map...")
     pairs_path = Path('outputs/query_pairs.txt')
     pairs_from_retrieval.main(
         descriptors=query_global_feats, 
         output=pairs_path, 
         num_matched=5, 
-        db_descriptors=map_global_feats # <-- This is what was missing!
+        db_descriptors=map_global_feats 
     )
     
     print("Filtering out dropped map frames...")
     import pycolmap
     model = pycolmap.Reconstruction(sfm_dir)
-    # Get a list of the images that actually survived the 3D reconstruction
     registered_images = {img.name for img in model.images.values()}
     
     with open(pairs_path, 'r') as f:
@@ -171,7 +216,6 @@ def main():
     valid_pairs = []
     for line in pairs_lines:
         test_img, train_img = line.strip().split()
-        # Only keep the pair if the training image exists in the 3D map
         if train_img in registered_images:
             valid_pairs.append(line)
             
@@ -181,45 +225,50 @@ def main():
 
     # 5. Match the SuperPoint features
     print("Matching exact points...")
-    # We must explicitly tell it to look at the training features we generated in script 1
     map_features_path = Path('outputs/feats-superpoint-n4096-r1024.h5')
-    
     match_features.main(
         matcher_conf, 
         pairs_path, 
         features=features_path, 
-        features_ref=map_features_path, # <-- And this was missing!
+        features_ref=map_features_path, 
         matches=matches_path
     )
     
-    # 6. Run the Localization Engine!
+    # 6. Run the Localization Engine
     print("Preparing camera intrinsics...")
     query_list_path = Path('outputs/query_list_with_intrinsics.txt')
-    
-    # hloc expects a text file mapping each image to its camera properties
     with open(query_list_path, 'w') as f:
         for name in frame_names:
-            # Format: image_name camera_model width height focal_length center_x center_y
             f.write(f"{name} SIMPLE_PINHOLE 1920 1080 900 960 540\n")
     
     print("Calculating 3D Poses...")
     localize_sfm.main(
-        sfm_dir,             # The reference 3D map
-        query_list_path,     # The text file with camera intrinsics we just generated
-        pairs_path,          # The retrieved image pairs
-        features_path,       # The test frame features
-        matches_path,        # The exact matched points
-        poses_path           # The output file for the calculated math
+        sfm_dir,             
+        query_list_path,     
+        pairs_path,          
+        features_path,       
+        matches_path,        
+        poses_path           
     )
     
-    # 7. Convert the math into the final SRT
-    # 7. Convert the math into the final SRT
-    generate_srt(
+    # 7. Convert the math into the final SRT AND KML
+    ref_lat, ref_lon = 32.102624, 35.209724
+    if test_srt_file.exists():
+        with open(test_srt_file, 'r') as f:
+            content = f.read()
+            lat_match = re.search(r'latitude:\s*([-0-9.]+)', content)
+            lon_match = re.search(r'longitude:\s*([-0-9.]+)', content)
+            if lat_match and lon_match:
+                ref_lat = float(lat_match.group(1))
+                ref_lon = float(lon_match.group(1))
+
+    generate_srt_and_kml(
         poses_file=poses_path, 
         output_srt=final_srt, 
+        output_kml=final_kml, 
         test_srt_path=test_srt_file, 
-        reference_lat=32.102624, 
-        reference_lon=35.209724,
+        reference_lat=ref_lat, 
+        reference_lon=ref_lon,
         frame_names=frame_names 
     )
 
